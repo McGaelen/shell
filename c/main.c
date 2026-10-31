@@ -11,6 +11,7 @@
 enum : uint8_t {
   TS_COMMENT,
   TS_COMMAND,
+  TS_COMMAND_BETWEEN,
   TS_REDIRECTION,
 };
 
@@ -29,37 +30,41 @@ int main(int argc, char **argv) {
   char buf;
   uint8_t tokenizer_state = TS_COMMAND;
   String statement = String_init();
+  String redirection = String_init();
 
   while (fread(&buf, 1, 1, script_file) > 0) {
+    // If we're inside a comment, skip all characters until we reach a newline.
+    if (tokenizer_state == TS_COMMENT) {
+      if (buf == '\n') {
+        tokenizer_state = TS_COMMAND;
+      }
+      continue;
+    }
+
     switch (buf) {
       case ' ':
       case '\t':
       case '\n':
-        continue;
+        if (tokenizer_state == TS_COMMAND) {
+          String_append(&statement, buf);
+        }
+        break;
       case '#':
         tokenizer_state = TS_COMMENT;
         break;
       case '>':
         tokenizer_state = TS_REDIRECTION;
       case ';':
-        // do the thing
-        break;
-      // default:
-        // no op
-    }
-
-    switch (tokenizer_state) {
-      case TOKENIZER_STATE_STATEMENT_START:
-        String_append(&statement, buf);
-        break;
-      case TS_COMMENT:
-        String_print(&statement);
-        tokenizer_state = TOKENIZER_STATE_STATEMENT_START;
-        String_clear(&statement);
+      case '|':
+        // run it!
         break;
       default:
-        printf("Unknown state! %i\n", tokenizer_state);
-        exit(1);
+        if (tokenizer_state == TS_COMMAND || tokenizer_state == TS_COMMAND_BETWEEN) {
+          String_append(&statement, buf);
+        } else if (tokenizer_state == TS_REDIRECTION) {
+          String_append(&redirection, buf);
+        }
+        break;
     }
   }
 
