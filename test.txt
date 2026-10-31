@@ -1,0 +1,13 @@
+# set to variable myvar
+cmd hello > $myvar;
+
+# interpolates string
+cmd {$myvar};
+
+# redirects stdout into the filepath in $myvar
+cmd > {$myvar};
+
+# redirects stdout into the new variable $myvar2
+cmd > $myvar2;
+
+cmd --arg thing > file.txt | cmd2 {$%}
