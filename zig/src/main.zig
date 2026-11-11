@@ -3,14 +3,52 @@ const Io = std.Io;
 const print = std.debug.print;
 const log = std.log;
 const posix = std.posix;
+const ArrayList = std.ArrayList;
 
 const String = @import("String.zig");
 
 const TokenizerState = enum {
+  start,
+
   comment,
-  command,
-  command_between,
-  redirection,
+
+  string,
+
+  interpol_start,
+  interpol_variable,
+  interpol_subcommand,
+  interpol_end,
+
+  redirect_start,
+  redirect_file,
+  redirect_variable,
+
+  end,
+
+  // TODO:
+  // multiline string '\\'
+};
+
+const RedirectionType = enum {
+  none,
+  file,
+  variable
+};
+
+const Interpolation = union(enum) {
+  variable: ArrayList(u8),
+  subcommand: CommandSegmentList,
+};
+
+const CommandSegment = union(enum) {
+  string: ArrayList(u8),
+  interpol: Interpolation,
+};
+
+const CommandSegmentList = struct {
+  list: ArrayList(CommandSegment),
+  redirect_type: RedirectionType,
+  redirect_name: ArrayList(u8),
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -36,89 +74,83 @@ pub fn main(init: std.process.Init) !void {
   // var stdout_writer: Io.File.Writer = .init(Io.File.stdout(), io, &stdout_buf);
   // const stdout = &stdout_writer.interface;
 
-  var tokenizer_state: TokenizerState = .command;
-  var statement = try std.ArrayList(u8).initCapacity(arena, 100);
-  var redirection = try std.ArrayList(u8).initCapacity(arena, 100);
+  var tokenizer_state: TokenizerState = .start;
+  // var statement = try std.ArrayList(u8).initCapacity(arena, 100);
+  // var redirection = try std.ArrayList(u8).initCapacity(arena, 100);
 
-  nextByte: while (script.takeByte()) |char| {
-    // If we're inside a comment, skip all characters until we reach a newline.
+  while (script.takeByte()) |char| {
+
+    // If we're inside a comment, skip all chars until we reach a newline.
     if (tokenizer_state == .comment) {
       if (char == '\n') {
-        tokenizer_state = .command;
+        tokenizer_state = .start;
       }
-      continue :nextByte;
+      continue;
     }
 
-    tokenizer_state = state: switch (char) {
-      ' ', '\t', '\n' => {
-        if (tokenizer_state == .command) {
-          try statement.append(arena, char);
-        }
-        break :state tokenizer_state;
-      },
+    tokenizer_state = switch (char) {
       '#' => .comment,
-      '>' => .redirection,
-      ';', '|' => {
-        // Run it!
-        // print("Statement: ", .{});
-        // for (statement.items) |item| {
-        //   print("{c}", .{item});
-        // }
-        // print("\n", .{});
-        // print("Redirection: ", .{});
-        // for (redirection.items) |item| {
-        //   print("{c}", .{item});
-        // }
-        // print("\n\n", .{});
 
-        var parsed: std.ArrayList([]const u8) = try .initCapacity(arena, 10);
-        var last_space_idx: usize = 0;
-        for (statement.items, 0..) |s, i| {
-          if (s == ' ') {
-            try parsed.append(arena, statement.items[last_space_idx..i]);
-            last_space_idx = i + 1;
-          }
-          if (i == statement.items.len - 1 and parsed.items.len == 0) {
-            try parsed.append(arena, statement.items);
-          }
-        }
-
-        for (parsed.items) |p| {
-          print("'", .{});
-          for (p) |c| {
-            print("{c}", .{c});
-          }
-          print("' ", .{});
-        }
-        print("\n", .{});
-
-        // split up the Statement based on whitespace
-//         std.process.spawn(io, .{
-//
-//         });
-
-        // pass the args to some equivalent of execvp() (without replacing the process)
-        //
-        // stream stdout to the screen if no redirection
-        // if redirection, send it there
-
-
-        // Reset back to initial state to start parsing the next statement
-        statement.clearRetainingCapacity();
-        redirection.clearRetainingCapacity();
-        break :state .command_between;
+      // Interpolations start with a left curly.
+      // If it's immediately followed by a '$', then it's considered a variable.
+      // If it's any other character, it's considered a subcommand (see else prong).
+      '{' => .interpol_start,
+      '$' => switch (tokenizer_state) {
+        .interpol_start => .interpol_variable,
+        .redirect_start => .redirect_variable,
+        else => .string
       },
-      else => {
-        if (tokenizer_state == .command or tokenizer_state == .command_between) {
-          try statement.append(arena, char);
-        } else if (tokenizer_state == .redirection) {
-          try redirection.append(arena, char);
-        }
-        break :state tokenizer_state;
-      },
+      '}' => .interpol_end,
+
+      // Anytime we see this, it means a redirect is starting.
+      // Anything after this is considered part of the redirection (which can include an interpolation)
+      '>' => .redirect_start,
+
+      // Whitespace handling:
+      // Any whitespace should be effectively ignored, allowing flexible formatting of scripts.
+      // This makes it easy to add newlines and indentations around special characters like '>' or '{ $var }'
+      // This is why differentiating between the start of a segment and the actual content of the segment is useful.
+      // We can ignore any whitespace around the start, and once we're inside the actual content, then whitespace is counted to preserve the meaning of the command.
+      ' ', '\n', '\t' => tokenizer_state,
+
+      // We're ready to run the command.
+      ';', '|' => .end,
+
+      else => switch (tokenizer_state) {
+        .interpol_start => .interpol_subcommand,
+        .redirect_start => .redirect_file,
+        // If we aren't in an interpolation, a redirect, or a comment, then we must be in a string segment.
+        .start, .string, .interpol_end, .end => .string,
+        // For all other chars, latch to whatever the prev state was, so it keeps appending chars.
+        .interpol_subcommand, .interpol_variable, .redirect_file, .redirect_variable, .comment => tokenizer_state
+      }
     };
 
-    // print("{c}: {}\n", .{char, tokenizer_state});
+    switch (tokenizer_state) {
+      .comment => continue,
+      .end => {
+        //
+        // Run it!
+        // 1. Apply interpolations for the command
+        // 2. Do command/argv splitting on the result
+        //    - this means spaces within interpolations will be accounted for during arg splitting, similar to bash/sh. (fish doesn't do that!)
+        // 3. Prepare redirection destination:
+        //    - if it's a variable, create it if it doesn't exist
+        //    - if it's a file, apply interpolations (supports variables and subcommands)
+        //      - if the interpolation resolves to something that starts with $, it is saved to a file with that literal name! It does NOT go back to being saved to a variable.
+        // 4. If it's piped, create the % variable
+        // 5. Call execvp()/std.process.spawn()
+        //
+        const is_piped = char == '|';
+        log.info("is_piped: {}\n", .{is_piped});
+
+        // start it all again!
+        tokenizer_state = .start;
+      },
+      else => {}
+    }
+
+    print("{c} {}\n", .{char, tokenizer_state});
   } else |err| switch (err) {
     error.EndOfStream => log.info("Finished running script.", .{}),
     else => return err,

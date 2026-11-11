@@ -13,3 +13,7 @@ cmd1 | cmd2;
 cmd |;
 
 cmd --arg 1;
+
+cmd {$myvar};
+{$mycmdvar};
+cmd > {$myfilevar};
